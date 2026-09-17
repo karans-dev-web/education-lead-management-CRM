@@ -13,8 +13,12 @@ a few demo leads automatically — no separate schema.sql needed.
 """
 
 import os
+import csv
+import io
+from functools import wraps
 import sqlite3
-from flask import Flask, request, jsonify, Response
+from urllib.parse import quote
+from flask import Flask, request, jsonify, Response, session
 
 # ------------------------------------------------------------------
 # Config
@@ -28,6 +32,12 @@ STATUSES = ["New", "Contacted", "Interested", "Follow-up", "Converted", "Not Int
 SOURCES = ["Instagram", "Google", "Referral", "Website"]
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "infinity-crm-local-secret")
+
+DEMO_USERS = {
+  "admin": {"password": "admin123", "name": "CRM Admin", "role": "Admin"},
+  "priya": {"password": "priya123", "name": "Priya Sharma", "role": "Counsellor"},
+}
 
 
 def get_conn():
@@ -93,6 +103,36 @@ def init_db():
           )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('Admin', 'Counsellor')),
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+
+    for column, definition in [
+        ("requirement", "TEXT"),
+        ("lead_score", "INTEGER NOT NULL DEFAULT 0"),
+        ("score_label", "TEXT NOT NULL DEFAULT 'Cold'"),
+        ("last_contacted_at", "TEXT"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as error:
+            if "duplicate column" not in str(error).lower():
+                raise
+
+    conn.commit()
+
+    cur.executemany(
+      "INSERT OR IGNORE INTO users (username, password, name, role) VALUES (?, ?, ?, ?)",
+      [(username, user["password"], user["name"], user["role"])
+       for username, user in DEMO_USERS.items()],
+    )
     conn.commit()
 
     # 3. Seed reference data + demo leads, only if empty
@@ -156,9 +196,61 @@ LEAD_SELECT = """
 """
 
 
+def today_iso():
+    return __import__("datetime").date.today().isoformat()
+
+
+def recommendation_for(row):
+    if row["status"] == "Converted":
+        return "Admission confirmed. Keep the student warm for referrals and onboarding."
+    if row["followup_date"] and str(row["followup_date"]) <= today_iso():
+        return "Follow up today. Lead is due for contact and should be prioritised."
+    if row["score_label"] == "Hot":
+        return "Call within 15 minutes, confirm the course requirement, and send the next step on WhatsApp."
+    if not row["email"]:
+        return "Ask for an email address and share the course brochure after the next call."
+    return "Send a personalised course message and schedule the next follow-up."
+
+
+def score_lead(data):
+    score = 20
+    status_points = {"New": 5, "Contacted": 15, "Interested": 30, "Follow-up": 25, "Converted": 50, "Not Interested": -30}
+    score += status_points.get(data.get("status", "New"), 0)
+    if data.get("email"):
+        score += 10
+    if data.get("requirement"):
+        score += 15
+    if data.get("followup_date"):
+        score += 10
+    if data.get("source") in ("Referral", "Website"):
+        score += 5
+    score = max(0, min(100, score))
+    label = "Hot" if score >= 70 else "Warm" if score >= 45 else "Cold"
+    return score, label
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user" not in session:
+            return jsonify({"error": "Login required"}), 401
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if session["user"]["role"] != "Admin":
+            return jsonify({"error": "Admin access required"}), 403
+        return view(*args, **kwargs)
+    return wrapped
+
+
 def row_to_lead(row):
-  def as_text(value):
-    return value.isoformat() if hasattr(value, "isoformat") else value
+    def as_text(value):
+        return value.isoformat() if hasattr(value, "isoformat") else value
 
     return {
         "id": row["id"],
@@ -174,6 +266,11 @@ def row_to_lead(row):
         "counsellor": row["counsellor_name"],
         "followup_date": as_text(row["followup_date"]),
         "created_at": as_text(row["created_at"]),
+        "requirement": row["requirement"] or "",
+        "lead_score": row["lead_score"],
+        "score_label": row["score_label"],
+        "recommendation": recommendation_for(row),
+        "whatsapp_url": "https://wa.me/" + "".join(ch for ch in (row["phone"] or "") if ch.isdigit()),
     }
 
 
@@ -181,7 +278,31 @@ def row_to_lead(row):
 # API routes
 # ------------------------------------------------------------------
 
+@app.route("/api/login", methods=["POST"])
+def api_login():
+  data = request.get_json(force=True) or {}
+  username = (data.get("username") or "").strip().lower()
+  password = data.get("password") or ""
+  user = DEMO_USERS.get(username)
+  if not user or user["password"] != password:
+    return jsonify({"error": "Invalid username or password"}), 401
+  session["user"] = {"username": username, "name": user["name"], "role": user["role"]}
+  return jsonify(session["user"])
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+  session.clear()
+  return jsonify({"ok": True})
+
+
+@app.route("/api/me")
+def api_me():
+  return jsonify(session.get("user")) if "user" in session else (jsonify({"user": None}), 401)
+
+
 @app.route("/api/meta")
+@login_required
 def api_meta():
     conn = get_conn()
     cur = conn.cursor()
@@ -192,16 +313,19 @@ def api_meta():
     cur.close()
     conn.close()
     return jsonify({"courses": courses, "counsellors": counsellors,
-                     "statuses": STATUSES, "sources": SOURCES})
+             "statuses": STATUSES, "sources": SOURCES,
+             "user": session["user"]})
 
 
 @app.route("/api/leads", methods=["GET"])
+@login_required
 def api_list_leads():
     q = request.args.get("q", "").strip()
     status = request.args.get("status", "").strip()
     source = request.args.get("source", "").strip()
     course_id = request.args.get("course_id", "").strip()
     counsellor_id = request.args.get("counsellor_id", "").strip()
+    score_label = request.args.get("score", "").strip()
 
     where, params = [], []
     if q:
@@ -216,6 +340,8 @@ def api_list_leads():
         where.append("l.course_id = ?"); params.append(course_id)
     if counsellor_id:
         where.append("l.counsellor_id = ?"); params.append(counsellor_id)
+    if score_label:
+      where.append("l.score_label = ?"); params.append(score_label)
 
     sql = LEAD_SELECT
     if where:
@@ -232,6 +358,7 @@ def api_list_leads():
 
 
 @app.route("/api/leads", methods=["POST"])
+@login_required
 def api_create_lead():
     data = request.get_json(force=True)
     required = ["name", "phone", "city", "course_id", "source", "counsellor_id"]
@@ -243,13 +370,14 @@ def api_create_lead():
 
     conn = get_conn()
     cur = conn.cursor()
+    score, score_label = score_lead(data)
     cur.execute(
-        """INSERT INTO leads (name, phone, email, city, course_id, source, status,
-                               counsellor_id, followup_date)
-           VALUES (?,?,?,?,?,?, 'New',?,?)""",
+      """INSERT INTO leads (name, phone, email, city, course_id, source, status,
+                   counsellor_id, followup_date, requirement, lead_score, score_label)
+         VALUES (?,?,?,?,?,?, 'New',?,?,?,?,?)""",
         (data["name"], data["phone"], data.get("email"), data["city"],
          data["course_id"], data["source"], data["counsellor_id"],
-         data.get("followup_date") or None),
+       data.get("followup_date") or None, data.get("requirement") or "", score, score_label),
     )
     lead_id = cur.lastrowid
     note = (data.get("note") or "").strip()
@@ -262,6 +390,7 @@ def api_create_lead():
 
 
 @app.route("/api/leads/<int:lead_id>", methods=["PUT"])
+@login_required
 def api_update_lead(lead_id):
     data = request.get_json(force=True)
     fields, params = [], []
@@ -273,11 +402,26 @@ def api_update_lead(lead_id):
         fields.append("counsellor_id = ?"); params.append(data["counsellor_id"])
     if "followup_date" in data:
         fields.append("followup_date = ?"); params.append(data["followup_date"] or None)
+    if "requirement" in data:
+      fields.append("requirement = ?"); params.append((data["requirement"] or "").strip())
+    if "email" in data:
+      fields.append("email = ?"); params.append((data["email"] or "").strip() or None)
+    if "phone" in data:
+      fields.append("phone = ?"); params.append((data["phone"] or "").strip())
     if not fields:
         return jsonify({"error": "Nothing to update"}), 400
 
-    params.append(lead_id)
     conn = get_conn()
+    current = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+    if not current:
+      conn.close()
+      return jsonify({"error": "Lead not found"}), 404
+    merged = dict(current)
+    merged.update(data)
+    score, score_label = score_lead(merged)
+    fields.extend(["lead_score = ?", "score_label = ?"])
+    params.extend([score, score_label])
+    params.append(lead_id)
     cur = conn.cursor()
     cur.execute(f"UPDATE leads SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
@@ -287,6 +431,7 @@ def api_update_lead(lead_id):
 
 
 @app.route("/api/leads/<int:lead_id>", methods=["DELETE"])
+@admin_required
 def api_delete_lead(lead_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -298,6 +443,7 @@ def api_delete_lead(lead_id):
 
 
 @app.route("/api/leads/<int:lead_id>/notes", methods=["GET"])
+@login_required
 def api_get_notes(lead_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -315,6 +461,7 @@ def api_get_notes(lead_id):
 
 
 @app.route("/api/leads/<int:lead_id>/notes", methods=["POST"])
+@login_required
 def api_add_note(lead_id):
     data = request.get_json(force=True)
     note = (data.get("note") or "").strip()
@@ -330,6 +477,7 @@ def api_add_note(lead_id):
 
 
 @app.route("/api/dashboard")
+@login_required
 def api_dashboard():
     conn = get_conn()
     cur = conn.cursor()
@@ -351,6 +499,14 @@ def api_dashboard():
 
     cur.execute("SELECT COUNT(*) AS n FROM leads")
     total = cur.fetchone()["n"]
+    cur.execute("SELECT score_label, COUNT(*) AS n FROM leads GROUP BY score_label")
+    by_score = {r["score_label"]: r["n"] for r in cur.fetchall()}
+    cur.execute("""
+        SELECT COUNT(*) AS n FROM leads
+        WHERE followup_date IS NOT NULL AND followup_date <= date('now')
+          AND status NOT IN ('Converted', 'Not Interested')
+    """)
+    reminders_due = cur.fetchone()["n"]
     cur.close()
     conn.close()
 
@@ -360,6 +516,8 @@ def api_dashboard():
         by_status.setdefault(s, 0)
     for s in SOURCES:
         by_source.setdefault(s, 0)
+    for s in ("Hot", "Warm", "Cold"):
+      by_score.setdefault(s, 0)
 
     return jsonify({
         "total": total,
@@ -370,7 +528,36 @@ def api_dashboard():
         "by_status": by_status,
         "by_source": by_source,
         "by_counsellor": by_counsellor,
+        "by_score": by_score,
+        "reminders_due": reminders_due,
+        "funnel": [{"stage": s, "count": by_status[s]} for s in STATUSES],
     })
+
+
+@app.route("/api/reminders")
+@login_required
+def api_reminders():
+    conn = get_conn()
+    rows = conn.execute(LEAD_SELECT + " WHERE l.followup_date IS NOT NULL AND l.followup_date <= date('now') AND l.status NOT IN ('Converted', 'Not Interested') ORDER BY l.followup_date ASC").fetchall()
+    conn.close()
+    return jsonify([row_to_lead(row) for row in rows])
+
+
+@app.route("/api/export/leads.csv")
+@login_required
+def api_export_leads():
+    conn = get_conn()
+    rows = conn.execute(LEAD_SELECT + " ORDER BY l.created_at DESC").fetchall()
+    conn.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Name", "Phone", "Email", "City", "Course", "Source", "Status", "Score", "Priority", "Counsellor", "Follow-up", "Requirement", "Created"])
+    for row in rows:
+        lead = row_to_lead(row)
+        writer.writerow([lead["name"], lead["phone"], lead["email"], lead["city"], lead["course"], lead["source"], lead["status"], lead["lead_score"], lead["score_label"], lead["counsellor"], lead["followup_date"], lead["requirement"], lead["created_at"]])
+    response = Response("\ufeff" + output.getvalue(), mimetype="text/csv")
+    response.headers["Content-Disposition"] = "attachment; filename=edulead-leads.csv"
+    return response
 
 
 # ------------------------------------------------------------------
@@ -425,7 +612,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .live-dot{ width:8px; height:8px; border-radius:50%; background:var(--sage); box-shadow:0 0 0 4px var(--sage-soft); }
   .view-header h1{ font-size:28px; font-weight:600; margin:0 0 6px; }
   .view-header p{ margin:0; color:var(--muted); font-size:14.5px; max-width:640px; line-height:1.5; }
-  .stat-grid{ display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:28px; }
+  .stat-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; margin-bottom:28px; }
   .stat-card{ background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px 18px 16px; box-shadow:var(--shadow); }
   .stat-num{ font-size:30px; font-weight:600; line-height:1; }
   .stat-label{ font-size:12.8px; color:var(--muted); margin-top:8px; }
@@ -507,6 +694,24 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .drawer-select, .drawer-date, .drawer-textarea{ width:100%; padding:9px 12px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--ink); font-family:inherit; font-size:13.8px; }
   .drawer-textarea{ min-height:64px; resize:vertical; }
   .drawer[aria-hidden="true"]{ visibility:hidden; }
+  .app.hidden{ display:none; }
+  .login-screen{ min-height:100vh; display:grid; place-items:center; padding:24px; background:radial-gradient(circle at 20% 10%, rgba(180,132,42,0.22), transparent 35%), var(--bg); }
+  .login-card{ width:min(430px,100%); background:var(--surface); border:1px solid var(--border); border-radius:18px; padding:34px; box-shadow:var(--shadow); }
+  .login-card h1{ margin:0 0 8px; font-size:29px; }
+  .login-card p{ margin:0 0 24px; color:var(--muted); line-height:1.5; font-size:14px; }
+  .login-brand{ color:var(--gold); font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; margin-bottom:10px; }
+  .login-field{ display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+  .login-field label{ font-size:13px; font-weight:600; }
+  .login-field input{ background:var(--bg); border:1px solid var(--border); color:var(--ink); padding:11px 12px; border-radius:9px; font:inherit; }
+  .login-error{ min-height:18px; color:var(--brick); font-size:12.5px; margin:8px 0; }
+  .priority-panel{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  .priority-list, .funnel-list{ display:flex; flex-direction:column; gap:9px; }
+  .priority-line, .funnel-line{ display:flex; justify-content:space-between; gap:12px; font-size:13px; padding:9px 0; border-bottom:1px solid var(--border); }
+  .priority-line:last-child, .funnel-line:last-child{ border-bottom:none; }
+  .priority-label{ font-weight:700; }
+  .priority-label.hot{ color:var(--brick); }.priority-label.warm{ color:var(--amber); }.priority-label.cold{ color:var(--slate); }
+  .recommendation{ background:var(--gold-soft); border:1px solid var(--gold); border-radius:9px; padding:11px 12px; color:var(--ink); font-size:13px; line-height:1.45; }
+  .whatsapp-btn{ display:inline-flex; align-items:center; gap:7px; color:var(--sage); background:var(--sage-soft); border:1px solid transparent; text-decoration:none; padding:7px 10px; border-radius:7px; font-size:12.5px; font-weight:700; }
   @media (max-width: 860px){
     .app{ flex-direction:column; }
     .sidebar{ width:100%; flex-direction:row; align-items:center; overflow-x:auto; padding:14px 16px; gap:16px; }
@@ -517,13 +722,26 @@ INDEX_HTML = r"""<!DOCTYPE html>
     .chart-grid{ grid-template-columns:1fr; }
     .form-grid{ grid-template-columns:1fr; }
     .drawer{ width:100%; max-width:100%; }
+    .priority-panel{ grid-template-columns:1fr; }
     .view-header{ align-items:flex-start; flex-direction:column; gap:12px; }
     .header-meta{ white-space:normal; }
   }
 </style>
 </head>
 <body>
-<div class="app">
+<section class="login-screen" id="loginScreen">
+  <form class="login-card" id="loginForm">
+    <div class="login-brand">Infinity Education</div>
+    <h1>Lead Desk</h1>
+    <p>Sign in to manage the counselling pipeline, reminders and conversion insights.</p>
+    <div class="login-field"><label for="loginUser">Username</label><input id="loginUser" autocomplete="username" required placeholder="admin"></div>
+    <div class="login-field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" required placeholder="••••••••"></div>
+    <div class="login-error" id="loginError"></div>
+    <button class="btn" type="submit" style="width:100%;">Sign in</button>
+    <div class="form-note">Demo access: <strong>admin / admin123</strong> or <strong>priya / priya123</strong></div>
+  </form>
+</section>
+<div class="app hidden" id="appShell">
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-mark">Infinity Education</div>
@@ -536,7 +754,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <button class="nav-btn" data-view="new"><span class="nav-dot"></span>New enquiry</button>
       <button class="nav-btn" data-view="followups"><span class="nav-dot"></span>Follow-ups</button>
     </nav>
-    <div class="sidebar-foot">Backed by a local database — visible to every counsellor using this app.</div>
+    <div class="sidebar-foot"><span id="userBadge">Signed in</span><br>Backed by a local database — visible to every counsellor using this app.<br><button class="btn danger-text" id="logoutBtn" type="button">Sign out</button></div>
   </aside>
 
   <main class="main">
@@ -548,6 +766,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="panel"><h3>Leads by source</h3><div class="panel-sub">Where enquiries are coming from this period.</div><div class="chart-wrap"><canvas id="chartSource"></canvas></div></div>
       </div>
       <div class="panel" style="margin-top:16px;"><h3>Counsellor performance</h3><div class="panel-sub">Assigned leads vs. admissions confirmed, by counsellor.</div><div class="chart-wrap tall"><canvas id="chartCounsellor"></canvas></div></div>
+      <div class="panel" style="margin-top:16px;"><h3>Priority and conversion funnel</h3><div class="panel-sub">AI-assisted lead priority distribution and pipeline movement.</div><div class="priority-panel"><div class="priority-list" id="priorityList"></div><div class="funnel-list" id="funnelList"></div></div></div>
     </section>
 
     <section class="view" id="view-leads">
@@ -558,7 +777,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <select id="fSource"><option value="">All sources</option></select>
         <select id="fCourse"><option value="">All courses</option></select>
         <select id="fCounsellor"><option value="">All counsellors</option></select>
+        <select id="fScore"><option value="">All priorities</option><option value="Hot">Hot</option><option value="Warm">Warm</option><option value="Cold">Cold</option></select>
         <button class="btn secondary small" id="clearFilters">Clear</button>
+        <a class="btn secondary small" href="/api/export/leads.csv" id="exportLeads">Export CSV</a>
         <button class="btn small" id="goNewFromLeads" style="margin-left:auto;">+ New enquiry</button>
       </div>
       <div class="table-scroll">
@@ -586,7 +807,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
           </div>
           <div class="field"><label for="inCounsellor">Assign counsellor / BDE</label><select id="inCounsellor" required></select></div>
           <div class="field"><label for="inFollowup">First follow-up date</label><input type="date" id="inFollowup"></div>
-          <div class="field full"><label for="inNotes">Enquiry notes</label><textarea id="inNotes" placeholder="What did the student ask about? Any specifics worth remembering."></textarea></div>
+          <div class="field full"><label for="inRequirement">Student requirement</label><textarea id="inRequirement" required placeholder="Course goal, budget, preferred batch, timeline..."></textarea></div>
+          <div class="field full"><label for="inNotes">Counselling notes</label><textarea id="inNotes" placeholder="What did the student ask about? Any specifics worth remembering."></textarea></div>
         </div>
         <div class="form-actions">
           <button type="submit" class="btn">Save enquiry</button>
@@ -617,8 +839,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="info-line"><span>Email</span><span id="drawerEmail"></span></div>
       <div class="info-line"><span>City</span><span id="drawerCity"></span></div>
       <div class="info-line"><span>Source</span><span id="drawerSource"></span></div>
+      <div class="info-line"><span>Priority</span><span id="drawerScore"></span></div>
       <div class="info-line"><span>Created</span><span id="drawerCreated"></span></div>
     </div>
+    <div class="drawer-section"><h4>AI next-best action</h4><div class="recommendation" id="drawerRecommendation"></div></div>
+    <div class="drawer-section"><a class="whatsapp-btn" id="whatsappBtn" target="_blank" rel="noopener">Open WhatsApp follow-up</a></div>
     <div class="drawer-section"><h4>Pipeline stage</h4><div class="status-pill-row" id="statusPillRow"></div></div>
     <div class="drawer-section"><h4>Counsellor / BDE</h4><select id="drawerCounsellor" class="drawer-select"></select></div>
     <div class="drawer-section"><h4>Follow-up date</h4><input type="date" id="drawerFollowup" class="drawer-date"></div>
@@ -645,6 +870,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   var allLeads = [];
   var activeLeadId = null;
   var charts = {};
+  var currentUser = null;
 
   function fmtDate(d){ if(!d) return "—"; var dt=new Date(d+"T00:00:00"); if(isNaN(dt)) return d; return dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); }
   function todayStr(){ var t=new Date(); return t.getFullYear()+"-"+String(t.getMonth()+1).padStart(2,'0')+"-"+String(t.getDate()).padStart(2,'0'); }
@@ -659,6 +885,28 @@ INDEX_HTML = r"""<!DOCTYPE html>
     if(!res.ok){ var body = await res.json().catch(function(){return {};}); throw new Error(body.error || res.statusText); }
     if(res.status === 204) return null;
     return res.json();
+  }
+
+  function showApp(user){
+    currentUser = user;
+    document.getElementById("loginScreen").style.display = "none";
+    document.getElementById("appShell").classList.remove("hidden");
+    document.getElementById("userBadge").textContent = user.name + " · " + user.role;
+  }
+
+  function setupLogin(){
+    document.getElementById("loginForm").addEventListener("submit", async function(e){
+      e.preventDefault();
+      var error = document.getElementById("loginError");
+      error.textContent = "";
+      try{
+        var user = await api("/api/login", {method:"POST", body:JSON.stringify({username:document.getElementById("loginUser").value, password:document.getElementById("loginPassword").value})});
+        showApp(user);
+        await loadMeta();
+        setupNav(); setupForm(); setupFilters(); setupDrawer(); await renderDashboard();
+      }catch(err){ error.textContent = err.message; }
+    });
+    document.getElementById("logoutBtn").addEventListener("click", async function(){ await api("/api/logout", {method:"POST"}); location.reload(); });
   }
 
   function populateSelect(el, items, valueKey, labelKey, withEmpty, emptyLabel){
@@ -681,6 +929,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     populateSelect(document.getElementById("fSource"), meta.sources, null, null, true, "All sources");
     populateSelect(document.getElementById("fCourse"), meta.courses, "id", "name", true, "All courses");
     populateSelect(document.getElementById("fCounsellor"), meta.counsellors, "id", "name", true, "All counsellors");
+    document.getElementById("fScore").value = "";
   }
 
   function setupNav(){
@@ -714,7 +963,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         source: document.getElementById("inSource").value,
         counsellor_id: document.getElementById("inCounsellor").value,
         followup_date: document.getElementById("inFollowup").value,
-        note: document.getElementById("inNotes").value.trim()
+        note: document.getElementById("inNotes").value.trim(),
+        requirement: document.getElementById("inRequirement").value.trim()
       };
       try{
         await api("/api/leads", { method:"POST", body: JSON.stringify(payload) });
@@ -729,7 +979,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   function setupFilters(){
-    ["fSearch","fStatus","fSource","fCourse","fCounsellor"].forEach(function(id){
+    ["fSearch","fStatus","fSource","fCourse","fCounsellor","fScore"].forEach(function(id){
       document.getElementById(id).addEventListener("input", loadAndRenderLeads);
       document.getElementById(id).addEventListener("change", loadAndRenderLeads);
     });
@@ -739,6 +989,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       document.getElementById("fSource").value = "";
       document.getElementById("fCourse").value = "";
       document.getElementById("fCounsellor").value = "";
+      document.getElementById("fScore").value = "";
       loadAndRenderLeads();
     });
   }
@@ -750,11 +1001,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
     var source = document.getElementById("fSource").value;
     var course_id = document.getElementById("fCourse").value;
     var counsellor_id = document.getElementById("fCounsellor").value;
+    var score = document.getElementById("fScore").value;
     if(q) params.set("q", q);
     if(status) params.set("status", status);
     if(source) params.set("source", source);
     if(course_id) params.set("course_id", course_id);
     if(counsellor_id) params.set("counsellor_id", counsellor_id);
+    if(score) params.set("score", score);
     return params.toString();
   }
 
@@ -803,7 +1056,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
       statCard(stats.interested, "Interested", "accent-gold") +
       statCard(stats.pending_followup, "Follow-up pending", "accent-amber") +
       statCard(stats.converted, "Converted / admitted", "accent-sage") +
-      statCard(stats.conversion_rate + "%", "Conversion rate", "accent-brick");
+      statCard(stats.conversion_rate + "%", "Conversion rate", "accent-brick") +
+      statCard(stats.reminders_due, "Reminders due", "accent-amber");
 
     var statusLabels = Object.keys(stats.by_status);
     var ctx1 = document.getElementById("chartStatus").getContext("2d");
@@ -835,6 +1089,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
       ]},
       options:{ maintainAspectRatio:false, plugins:{ legend:{position:"bottom", labels:{boxWidth:10, font:{size:11}, color:"#8A8578"}} }, scales:{ y:{beginAtZero:true, ticks:{precision:0, color:"#8A8578"}, grid:{color:"rgba(120,120,120,0.1)"}}, x:{ticks:{color:"#8A8578"}, grid:{display:false}} } }
     });
+    document.getElementById("priorityList").innerHTML = ["Hot", "Warm", "Cold"].map(function(label){ return '<div class="priority-line"><span class="priority-label '+label.toLowerCase()+'">'+label+' priority</span><strong>'+stats.by_score[label]+'</strong></div>'; }).join("");
+    document.getElementById("funnelList").innerHTML = stats.funnel.map(function(item){ return '<div class="funnel-line"><span>'+escapeHtml(item.stage)+'</span><strong>'+item.count+'</strong></div>'; }).join("");
     }catch(err){
       grid.innerHTML = '<div class="panel error-row" style="grid-column:1/-1;">Dashboard data is unavailable. Check that the server is running.</div>';
       showToast("Could not load dashboard: " + err.message);
@@ -946,6 +1202,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById("drawerEmail").textContent = lead.email || "—";
     document.getElementById("drawerCity").textContent = lead.city || "—";
     document.getElementById("drawerSource").textContent = lead.source || "—";
+    document.getElementById("drawerScore").textContent = (lead.score_label || "Cold") + " · " + lead.lead_score + "/100";
+    document.getElementById("drawerRecommendation").textContent = lead.recommendation || "Plan the next contact and record the outcome.";
+    document.getElementById("whatsappBtn").href = lead.whatsapp_url || "#";
     document.getElementById("drawerCreated").textContent = lead.created_at ? new Date(lead.created_at).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : "—";
     document.getElementById("drawerCounsellor").value = lead.counsellor_id;
     document.getElementById("drawerFollowup").value = lead.followup_date || "";
@@ -996,16 +1255,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   async function init(){
     setTodayLabel();
-    try{
-      await loadMeta();
-      setupNav();
-      setupForm();
-      setupFilters();
-      setupDrawer();
-      await renderDashboard();
-    }catch(err){
-      showToast("Could not connect to the CRM: " + err.message);
-    }
+    setupLogin();
+    try{ showApp(await api("/api/me")); await loadMeta(); setupNav(); setupForm(); setupFilters(); setupDrawer(); await renderDashboard(); }
+    catch(err){ document.getElementById("loginScreen").style.display = "grid"; document.getElementById("appShell").classList.add("hidden"); }
   }
 
   document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeDrawer(); });
