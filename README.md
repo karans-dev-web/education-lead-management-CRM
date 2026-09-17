@@ -17,3 +17,28 @@ Student Enquiry, Counselling & Lead Conversion Management System
 - **Backend**: Python, Flask
 - **Database**: SQLite, SQL
 - **Frontend**: HTML, CSS, JavaScript
+
+## How to Run Locally
+
+Clone the repository:
+
+```bash
+git clone https://github.com/karans-dev-web/education-lead-management-CRM.git
+cd education-lead-management-CRM
+```
+
+Create and activate a virtual environment on Windows:
+
+```powershell
+python -m venv venv
+venv\Scripts\activate
+```
+
+Install dependencies and start the app:
+
+```powershell
+pip install -r requirements.txt
+python infinity_education_crm_app.py
+```
+
+Open `http://127.0.0.1:5000` in your browser. The SQLite database is created automatically.

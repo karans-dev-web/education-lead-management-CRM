@@ -402,7 +402,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
   *{box-sizing:border-box;}
-  body{ margin:0; background:var(--bg); color:var(--ink); font-family:'IBM Plex Sans','Segoe UI',system-ui,sans-serif; }
+  body{ margin:0; background:radial-gradient(circle at 90% -10%, rgba(180,132,42,0.12), transparent 34%), var(--bg); color:var(--ink); font-family:'IBM Plex Sans','Segoe UI',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
   h1,h2,h3,.brand-name,.stat-num{ font-family:'Fraunces', Georgia, 'Times New Roman', serif; }
   .app{ display:flex; min-height:100vh; }
   .sidebar{ width:250px; flex-shrink:0; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; padding:28px 18px; gap:26px; }
@@ -412,13 +412,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
   nav.primary-nav{ display:flex; flex-direction:column; gap:2px; }
   .nav-btn{ display:flex; align-items:center; gap:10px; text-align:left; background:none; border:none; color:var(--ink-soft); font-size:14.5px; padding:10px 12px; border-radius:9px; cursor:pointer; border-left:3px solid transparent; font-family:inherit; }
   .nav-btn:hover{ background:var(--surface-2); }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible{ outline:3px solid rgba(180,132,42,0.35); outline-offset:2px; }
   .nav-btn.active{ background:var(--gold-soft); color:var(--ink); border-left:3px solid var(--gold); font-weight:600; }
   .nav-dot{ width:7px; height:7px; border-radius:50%; background:currentColor; opacity:0.55; }
   .sidebar-foot{ margin-top:auto; font-size:12px; color:var(--muted); line-height:1.5; }
   .main{ flex:1; min-width:0; padding:34px 42px 60px; }
   .view{ display:none; max-width:1180px; margin:0 auto; }
   .view.active{ display:block; }
-  .view-header{ margin-bottom:26px; }
+  .view-header{ display:flex; align-items:flex-end; justify-content:space-between; gap:20px; margin-bottom:26px; }
+  .eyebrow{ color:var(--gold); font-size:11px; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:8px; }
+  .header-meta{ display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12.5px; white-space:nowrap; }
+  .live-dot{ width:8px; height:8px; border-radius:50%; background:var(--sage); box-shadow:0 0 0 4px var(--sage-soft); }
   .view-header h1{ font-size:28px; font-weight:600; margin:0 0 6px; }
   .view-header p{ margin:0; color:var(--muted); font-size:14.5px; max-width:640px; line-height:1.5; }
   .stat-grid{ display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:28px; }
@@ -455,6 +459,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .badge{ display:inline-block; padding:4px 10px; border-radius:100px; font-size:12px; font-weight:600; }
   .empty-row td{ text-align:center; color:var(--muted); padding:40px 16px; cursor:default; }
   .empty-row:hover{ background:none; }
+  .loading-row td, .error-row td{ text-align:center; color:var(--muted); padding:36px 16px; }
+  .error-row td{ color:var(--brick); }
   .form-card{ background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:30px 32px; box-shadow:var(--shadow); max-width:720px; }
   .form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:18px 20px; }
   .field{ display:flex; flex-direction:column; gap:6px; }
@@ -500,6 +506,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .status-pill.selected{ border-color:transparent; color:#fff; }
   .drawer-select, .drawer-date, .drawer-textarea{ width:100%; padding:9px 12px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--ink); font-family:inherit; font-size:13.8px; }
   .drawer-textarea{ min-height:64px; resize:vertical; }
+  .drawer[aria-hidden="true"]{ visibility:hidden; }
   @media (max-width: 860px){
     .app{ flex-direction:column; }
     .sidebar{ width:100%; flex-direction:row; align-items:center; overflow-x:auto; padding:14px 16px; gap:16px; }
@@ -510,6 +517,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     .chart-grid{ grid-template-columns:1fr; }
     .form-grid{ grid-template-columns:1fr; }
     .drawer{ width:100%; max-width:100%; }
+    .view-header{ align-items:flex-start; flex-direction:column; gap:12px; }
+    .header-meta{ white-space:normal; }
   }
 </style>
 </head>
@@ -532,7 +541,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   <main class="main">
     <section class="view active" id="view-dashboard">
-      <div class="view-header"><h1>Conversion dashboard</h1><p>Where today's pipeline stands, from first enquiry through to admission.</p></div>
+      <div class="view-header"><div><div class="eyebrow">Operations overview</div><h1>Conversion dashboard</h1><p>Where today's pipeline stands, from first enquiry through to admission.</p></div><div class="header-meta"><span class="live-dot"></span><span>Live pipeline</span><span aria-hidden="true">·</span><span id="todayLabel"></span></div></div>
       <div class="stat-grid" id="statGrid"></div>
       <div class="chart-grid">
         <div class="panel"><h3>Leads by stage</h3><div class="panel-sub">Every lead currently sitting in each part of the pipeline.</div><div class="chart-wrap"><canvas id="chartStatus"></canvas></div></div>
@@ -542,7 +551,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </section>
 
     <section class="view" id="view-leads">
-      <div class="view-header"><h1>All leads</h1><p>Search, filter, and open any enquiry to update its stage or log a call.</p></div>
+      <div class="view-header"><div><div class="eyebrow">Pipeline workspace</div><h1>All leads</h1><p>Search, filter, and open any enquiry to update its stage or log a call.</p></div></div>
       <div class="filters">
         <input type="text" id="fSearch" placeholder="Search name, phone, email or city">
         <select id="fStatus"><option value="">All stages</option></select>
@@ -561,7 +570,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </section>
 
     <section class="view" id="view-new">
-      <div class="view-header"><h1>New enquiry</h1><p>Log a student's details the moment they reach out, so nothing is followed up from memory.</p></div>
+      <div class="view-header"><div><div class="eyebrow">Capture a new opportunity</div><h1>New enquiry</h1><p>Log a student's details the moment they reach out, so nothing is followed up from memory.</p></div></div>
       <form class="form-card" id="enquiryForm">
         <div class="form-grid">
           <div class="field"><label for="inName">Student name</label><input type="text" id="inName" required placeholder="e.g. Ayaan Khan"></div>
@@ -588,16 +597,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </section>
 
     <section class="view" id="view-followups">
-      <div class="view-header"><h1>Follow-ups</h1><p>Every lead with a scheduled follow-up, grouped by urgency so nothing slips.</p></div>
+      <div class="view-header"><div><div class="eyebrow">Next actions</div><h1>Follow-ups</h1><p>Every lead with a scheduled follow-up, grouped by urgency so nothing slips.</p></div></div>
       <div id="followupsContainer"></div>
     </section>
   </main>
 </div>
 
 <div class="overlay" id="overlay"></div>
-<aside class="drawer" id="drawer">
+<aside class="drawer" id="drawer" aria-hidden="true" aria-label="Lead details">
   <div class="drawer-head">
-    <button class="close-x" id="closeDrawer">&times;</button>
+    <button class="close-x" id="closeDrawer" type="button" aria-label="Close lead details">&times;</button>
     <h2 id="drawerName">Student name</h2>
     <div class="sub" id="drawerCourse">Course</div>
   </div>
@@ -622,7 +631,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <button class="btn danger-text" id="removeLeadBtn">Remove this lead</button>
   </div>
 </aside>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 (function(){
@@ -639,6 +648,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   function fmtDate(d){ if(!d) return "—"; var dt=new Date(d+"T00:00:00"); if(isNaN(dt)) return d; return dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); }
   function todayStr(){ var t=new Date(); return t.getFullYear()+"-"+String(t.getMonth()+1).padStart(2,'0')+"-"+String(t.getDate()).padStart(2,'0'); }
+  function setTodayLabel(){ document.getElementById("todayLabel").textContent = new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); }
   function escapeHtml(s){ if(!s) return ""; return String(s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
   function showToast(msg){ var t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(showToast._t); showToast._t=setTimeout(function(){ t.classList.remove("show"); },2200); }
 
@@ -749,27 +759,35 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   async function loadAndRenderLeads(){
-    var qs = buildQuery();
-    var rows = await api("/api/leads" + (qs ? "?" + qs : ""));
     var tbody = document.getElementById("leadsTbody");
-    tbody.innerHTML = "";
-    if(rows.length === 0){
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No leads match these filters yet.</td></tr>';
-      return;
+    tbody.innerHTML = '<tr class="loading-row"><td colspan="7">Loading leads...</td></tr>';
+    try{
+      var qs = buildQuery();
+      var rows = await api("/api/leads" + (qs ? "?" + qs : ""));
+      tbody.innerHTML = "";
+      if(rows.length === 0){
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No leads match these filters yet.</td></tr>';
+        return;
+      }
+      rows.forEach(function(l){
+        var tr = document.createElement("tr");
+        tr.tabIndex = 0;
+        tr.innerHTML =
+          '<td><div class="cell-name">'+escapeHtml(l.name)+'</div><div class="cell-sub">'+escapeHtml(l.phone)+'</div></td>'+
+          '<td>'+escapeHtml(l.city||"")+'</td>'+
+          '<td>'+escapeHtml(l.course||"—")+'</td>'+
+          '<td>'+escapeHtml(l.source)+'</td>'+
+          '<td>'+escapeHtml(l.counsellor||"—")+'</td>'+
+          '<td><span class="badge" style="background:'+STATUS_SOFT[l.status]+'; color:'+STATUS_COLOR[l.status]+';">'+l.status+'</span></td>'+
+          '<td>'+(l.followup_date ? fmtDate(l.followup_date) : "—")+'</td>';
+        tr.addEventListener("click", function(){ openDrawer(l.id); });
+        tr.addEventListener("keydown", function(e){ if(e.key === "Enter" || e.key === " "){ e.preventDefault(); openDrawer(l.id); } });
+        tbody.appendChild(tr);
+      });
+    }catch(err){
+      tbody.innerHTML = '<tr class="error-row"><td colspan="7">Could not load leads. Check that the server is running.</td></tr>';
+      showToast("Could not load leads: " + err.message);
     }
-    rows.forEach(function(l){
-      var tr = document.createElement("tr");
-      tr.innerHTML =
-        '<td><div class="cell-name">'+escapeHtml(l.name)+'</div><div class="cell-sub">'+escapeHtml(l.phone)+'</div></td>'+
-        '<td>'+escapeHtml(l.city||"")+'</td>'+
-        '<td>'+escapeHtml(l.course||"—")+'</td>'+
-        '<td>'+escapeHtml(l.source)+'</td>'+
-        '<td>'+escapeHtml(l.counsellor||"—")+'</td>'+
-        '<td><span class="badge" style="background:'+STATUS_SOFT[l.status]+'; color:'+STATUS_COLOR[l.status]+';">'+l.status+'</span></td>'+
-        '<td>'+(l.followup_date ? fmtDate(l.followup_date) : "—")+'</td>';
-      tr.addEventListener("click", function(){ openDrawer(l.id); });
-      tbody.appendChild(tr);
-    });
   }
 
   function statCard(num, label, accentClass){
@@ -777,8 +795,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   async function renderDashboard(){
-    var stats = await api("/api/dashboard");
     var grid = document.getElementById("statGrid");
+    try{
+    var stats = await api("/api/dashboard");
     grid.innerHTML =
       statCard(stats.total, "Total leads", "") +
       statCard(stats.interested, "Interested", "accent-gold") +
@@ -816,10 +835,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
       ]},
       options:{ maintainAspectRatio:false, plugins:{ legend:{position:"bottom", labels:{boxWidth:10, font:{size:11}, color:"#8A8578"}} }, scales:{ y:{beginAtZero:true, ticks:{precision:0, color:"#8A8578"}, grid:{color:"rgba(120,120,120,0.1)"}}, x:{ticks:{color:"#8A8578"}, grid:{display:false}} } }
     });
+    }catch(err){
+      grid.innerHTML = '<div class="panel error-row" style="grid-column:1/-1;">Dashboard data is unavailable. Check that the server is running.</div>';
+      showToast("Could not load dashboard: " + err.message);
+    }
   }
 
   async function renderFollowups(){
-    var rows = await api("/api/leads");
+    var container = document.getElementById("followupsContainer");
+    container.innerHTML = '<div class="panel">Loading follow-ups...</div>';
+    var rows;
+    try{ rows = await api("/api/leads"); }
+    catch(err){ container.innerHTML = '<div class="panel error-row">Could not load follow-ups. Check that the server is running.</div>'; showToast("Could not load follow-ups: " + err.message); return; }
     var withDate = rows.filter(function(l){ return !!l.followup_date; });
     withDate.sort(function(a,b){ return a.followup_date < b.followup_date ? -1 : 1; });
     var today = todayStr();
@@ -827,7 +854,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
     var todayList = withDate.filter(function(l){ return l.followup_date === today; });
     var upcoming = withDate.filter(function(l){ return l.followup_date > today; });
 
-    var container = document.getElementById("followupsContainer");
     container.innerHTML = "";
     if(withDate.length === 0){
       container.innerHTML = '<div class="panel">No follow-ups scheduled. Open a lead from "All leads" to set one.</div>';
@@ -946,6 +972,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     await loadNotesInto(id);
     document.getElementById("overlay").classList.add("show");
     document.getElementById("drawer").classList.add("show");
+    document.getElementById("drawer").setAttribute("aria-hidden", "false");
   }
 
   async function loadNotesInto(leadId){
@@ -963,18 +990,25 @@ INDEX_HTML = r"""<!DOCTYPE html>
   function closeDrawer(){
     document.getElementById("overlay").classList.remove("show");
     document.getElementById("drawer").classList.remove("show");
+    document.getElementById("drawer").setAttribute("aria-hidden", "true");
     activeLeadId = null;
   }
 
   async function init(){
-    await loadMeta();
-    setupNav();
-    setupForm();
-    setupFilters();
-    setupDrawer();
-    await renderDashboard();
+    setTodayLabel();
+    try{
+      await loadMeta();
+      setupNav();
+      setupForm();
+      setupFilters();
+      setupDrawer();
+      await renderDashboard();
+    }catch(err){
+      showToast("Could not connect to the CRM: " + err.message);
+    }
   }
 
+  document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeDrawer(); });
   document.addEventListener("DOMContentLoaded", init);
 })();
 </script>
@@ -994,4 +1028,4 @@ def index():
 
 if __name__ == "__main__":
     init_db()
-    app.run(debug=True, port=5000)
+    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", port=5000)
