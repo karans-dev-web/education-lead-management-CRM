@@ -42,3 +42,14 @@ python infinity_education_crm_app.py
 ```
 
 Open `http://127.0.0.1:5000` in your browser. The SQLite database is created automatically.
+
+## Deploy
+
+The repository includes a `Procfile` for hosts such as Render, Railway, and Heroku. Use:
+
+```bash
+pip install -r requirements.txt
+gunicorn infinity_education_crm_app:app
+```
+
+Set the application port from the hosting platform. The app uses SQLite and creates its database automatically on first start.
