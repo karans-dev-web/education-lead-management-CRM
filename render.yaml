@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: education-lead-management-crm
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn infinity_education_crm_app:app
